@@ -4,6 +4,9 @@ To get started, describe a task or try one of these commands:
  /status - show current session configuration and token usage
  /approvals - choose what Codex can do without approval
  /model - choose what model and reasoning effort to use
+ /fork - fork current session into a new tmux pane (horizontal)
+ /hfork - fork current session into a new tmux pane (horizontal)
+ /vfork - fork current session into a new tmux pane (vertical)
 
 codex
 I’m going to scan the workspace and Cargo manifests to see build profiles and

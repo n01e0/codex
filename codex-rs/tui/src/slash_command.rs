@@ -15,6 +15,12 @@ pub enum SlashCommand {
     Model,
     Approvals,
     New,
+    /// Fork current session into a new tmux pane (default: horizontal split)
+    Fork,
+    /// Fork with vertical split (alias when args are not supported)
+    Vfork,
+    /// Fork with horizontal split (explicit)
+    Hfork,
     Init,
     Compact,
     Diff,
@@ -32,6 +38,9 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             SlashCommand::New => "start a new chat during a conversation",
+            SlashCommand::Fork => "fork current session into a new tmux pane (horizontal)",
+            SlashCommand::Vfork => "fork current session into a new tmux pane (vertical)",
+            SlashCommand::Hfork => "fork current session into a new tmux pane (horizontal)",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Quit => "exit Codex",

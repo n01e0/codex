@@ -194,6 +194,9 @@ pub(crate) fn new_session_info(
             Line::from(format!(" /status - {}", SlashCommand::Status.description()).dim()),
             Line::from(format!(" /approvals - {}", SlashCommand::Approvals.description()).dim()),
             Line::from(format!(" /model - {}", SlashCommand::Model.description()).dim()),
+            Line::from(format!(" /fork - {}", SlashCommand::Fork.description()).dim()),
+            Line::from(format!(" /hfork - {}", SlashCommand::Hfork.description()).dim()),
+            Line::from(format!(" /vfork - {}", SlashCommand::Vfork.description()).dim()),
             Line::from("".dim()),
         ];
         PlainHistoryCell { lines }

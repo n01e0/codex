@@ -73,6 +73,9 @@ use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_file_search::FileMatch;
+use std::env;
+use std::fs;
+use std::path::Path;
 use uuid::Uuid;
 
 // Track information about an in-flight exec command.
@@ -597,6 +600,15 @@ impl ChatWidget {
             SlashCommand::New => {
                 self.app_event_tx.send(AppEvent::NewSession);
             }
+            SlashCommand::Fork => {
+                self.spawn_tmux_fork(false);
+            }
+            SlashCommand::Vfork => {
+                self.spawn_tmux_fork(true);
+            }
+            SlashCommand::Hfork => {
+                self.spawn_tmux_fork(false);
+            }
             SlashCommand::Init => {
                 // Guard: do not run if a task is active.
                 const INIT_PROMPT: &str = include_str!("../prompt_for_init_command.md");
@@ -697,6 +709,88 @@ impl ChatWidget {
             self.app_event_tx
                 .send(AppEvent::InsertHistoryCell(Box::new(active)));
         }
+    }
+
+    /// Attempt to fork the current session into a new tmux pane.
+    /// When `vertical` is true, use `tmux split-window -v`; otherwise `-h`.
+    fn spawn_tmux_fork(&mut self, vertical: bool) {
+        let tx = self.app_event_tx.clone();
+        let codex_home = self.config.codex_home.clone();
+        let cwd = self.config.cwd.clone();
+        let session_id = self.session_id;
+
+        tokio::spawn(async move {
+            // Helper: format user-facing error into history cell lines.
+            let send_error = |msg: String| {
+                tx.send(AppEvent::InsertHistoryCell(Box::new(
+                    crate::history_cell::new_error_event(msg),
+                )));
+            };
+
+            // Ensure we are in tmux.
+            if env::var_os("TMUX").is_none() {
+                send_error("`/fork` requires tmux (TMUX not set)".to_string());
+                return;
+            }
+
+            let Some(sid) = session_id else {
+                send_error("No active session id; cannot fork".to_string());
+                return;
+            };
+
+            // Locate rollout file for this session to resume from.
+            let resume_path_opt = find_rollout_file(&codex_home, &sid);
+            let resume_path = match resume_path_opt {
+                Some(p) => p,
+                None => {
+                    send_error("Cannot locate rollout file for current session".to_string());
+                    return;
+                }
+            };
+
+            // Resolve codex binary: prefer `codex` in PATH, fallback to current_exe.
+            let codex_bin = which_codex().unwrap_or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .unwrap_or_else(|| PathBuf::from("codex"))
+            });
+
+            // Build command string safely for shell via single-quote escaping per-arg.
+            let cmd_args = vec![
+                codex_bin.to_string_lossy().to_string(),
+                "--cd".to_string(),
+                cwd.to_string_lossy().to_string(),
+                "-c".to_string(),
+                format!("experimental_resume={}", resume_path.to_string_lossy()),
+            ];
+            let command_string = shell_join_argv(&cmd_args);
+
+            // tmux args
+            let split_flag = if vertical { "-v" } else { "-h" };
+            let mut tmux = tokio::process::Command::new("tmux");
+            tmux.args(["split-window", split_flag, "-c"]).arg(&cwd);
+            tmux.arg(command_string);
+
+            match tmux.status().await {
+                Ok(status) if status.success() => {
+                    // Success message
+                    use ratatui::text::Line;
+                    let dir_text = if vertical { "vertical" } else { "horizontal" };
+                    let lines = vec![
+                        Line::from(format!("/fork — launched new tmux pane ({dir_text})")),
+                        Line::from(format!("  • resume: {}", resume_path.to_string_lossy())),
+                        Line::from(String::new()),
+                    ];
+                    tx.send(AppEvent::InsertHistoryLines(lines));
+                }
+                Ok(status) => {
+                    send_error(format!("tmux split-window failed: {status}"));
+                }
+                Err(e) => {
+                    send_error(format!("failed to invoke tmux: {e}"));
+                }
+            }
+        });
     }
 
     fn add_to_history(&mut self, cell: impl HistoryCell + 'static) {
@@ -1024,6 +1118,69 @@ impl WidgetRef for &ChatWidget {
             cell.render_ref(active_cell_area, buf);
         }
     }
+}
+
+/// Recursively search `~/.codex/sessions` for a rollout file containing the given session UUID.
+fn find_rollout_file(codex_home: &Path, session_id: &Uuid) -> Option<PathBuf> {
+    let sessions_root = codex_home.join("sessions");
+    if !sessions_root.exists() {
+        return None;
+    }
+    let needle = format!("-{}.jsonl", session_id);
+    fn walk(dir: &Path, needle: &str, out: &mut Option<PathBuf>) {
+        if out.is_some() {
+            return;
+        }
+        let entries = match fs::read_dir(dir) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, needle, out);
+                if out.is_some() {
+                    return;
+                }
+            } else if let Some(name) = path.file_name().and_then(|s| s.to_str())
+                && name.ends_with(needle)
+            {
+                *out = Some(path);
+                return;
+            }
+        }
+    }
+    let mut found = None;
+    walk(&sessions_root, &needle, &mut found);
+    found
+}
+
+/// Minimal PATH resolution for `codex` binary. Returns absolute path if found.
+fn which_codex() -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    for p in env::split_paths(&path) {
+        let cand = p.join("codex");
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// Shell-escape each argv token using single quotes and join with spaces.
+fn shell_join_argv(argv: &[String]) -> String {
+    argv.iter()
+        .map(|s| shell_single_quote(s))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_single_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    let replaced = s.replace('\'', "'\\''");
+    format!("'{replaced}'")
 }
 
 const EXAMPLE_PROMPTS: [&str; 6] = [
